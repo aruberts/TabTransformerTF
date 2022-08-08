@@ -1,6 +1,13 @@
 # TabTransformerTF
 
-Implementation of [TabTransformer](https://arxiv.org/abs/2012.06678) in Keras.
+Implementation of [TabTransformer](https://arxiv.org/abs/2012.06678) in TensorFlow and Keras.
+
+## Installation
+
+The package can be install using
+```python 
+pip install tabtransformertf
+```
 
 ## Usage
 
