@@ -53,3 +53,20 @@ def build_numerical_prep(data: pd.DataFrame, numerical_features: list, qs: int =
         numeric_prep_layers[n] = (discretiser, int_lookup)
 
     return numeric_prep_layers
+
+
+def df_to_pretrain_dataset(
+    x: pd.DataFrame, y: np.array, shuffle: bool = True, batch_size: int = 512,
+):
+
+    dataset = {}
+    for key, value in x.items():
+        dataset[key] = value[:, tf.newaxis]
+
+    dataset = tf.data.Dataset.from_tensor_slices((dict(dataset), y))
+
+    if shuffle:
+        dataset = dataset.shuffle(buffer_size=len(x))
+    dataset = dataset.batch(batch_size)
+    dataset = dataset.prefetch(batch_size)
+    return dataset

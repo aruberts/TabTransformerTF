@@ -2,6 +2,7 @@ import tensorflow as tf
 from tensorflow.keras.activations import gelu
 from tensorflow.keras.layers import (
     Add,
+    BatchNormalization,
     Concatenate,
     Dense,
     Dropout,
@@ -61,25 +62,21 @@ class TransformerBlock(Layer):
         return transformer_output
 
 
-class TabTransformer(tf.keras.Model):
+class TabTransformerEncoder(tf.keras.Model):
     def __init__(
         self,
         categorical_features: list,
         numerical_features: list,
         categorical_lookup: dict,
-        out_dim: int,
-        out_activation: str,
         embedding_dim: int = 32,
         depth: int = 4,
         heads: int = 8,
         attn_dropout: float = 0.1,
         ff_dropout: float = 0.1,
-        mlp_hidden_factors: list = [2, 4],
         numerical_discretisers: dict = None,
         use_column_embedding: bool = True,
     ):
         """TabTransformer Tensorflow Model
-
         Args:
             categorical_features (list): names of categorical features
             numerical_features (list): names of numeric features
@@ -96,7 +93,7 @@ class TabTransformer(tf.keras.Model):
             use_column_embedding (bool, optional): flag to use fixed column positional embeddings. Defaults to True.
         """
 
-        super(TabTransformer, self).__init__()
+        super(TabTransformerEncoder, self).__init__()
         self.numerical = numerical_features
         self.categorical = categorical_features
         self.quantize = numerical_discretisers is not None
@@ -176,17 +173,6 @@ class TabTransformer(tf.keras.Model):
         # MLP
         self.pre_mlp_concatenation = Concatenate()
 
-        # mlp layers
-        if self.quantize:
-            mlp_input_dim = embedding_dim * (
-                len(self.numerical) + len(self.categorical)
-            )
-        else:
-            mlp_input_dim = len(self.numerical) + embedding_dim * len(self.categorical)
-
-        self.mlp_final = build_mlp(mlp_input_dim, mlp_hidden_factors, ff_dropout)
-        self.output_layer = Dense(out_dim, activation=out_activation)
-
     def call(self, inputs):
         numerical_feature_list = []
         categorical_feature_list = []
@@ -232,8 +218,117 @@ class TabTransformer(tf.keras.Model):
             numerical_inputs = self.continuous_normalization(numerical_inputs)
             mlp_input = self.pre_mlp_concatenation([mlp_input, numerical_inputs])
 
-        # Pass through MLP
-        mlp_output = self.mlp_final(mlp_input)
-        output = self.output_layer(mlp_output)
+        return mlp_input
+
+
+class TabTransformerRTD(tf.keras.Model):
+    def __init__(
+        self,
+        categorical_features: list,
+        numerical_features: list,
+        categorical_lookup: dict,
+        embedding_dim: int = 32,
+        depth: int = 4,
+        heads: int = 8,
+        attn_dropout: float = 0.1,
+        ff_dropout: float = 0.1,
+        numerical_discretisers: dict = None,
+        use_column_embedding: bool = True,
+        rtd_factor=2,
+    ):
+
+        super(TabTransformerRTD, self).__init__()
+
+        # Initialise encoder
+        self.encoder = TabTransformerEncoder(
+            categorical_features,
+            numerical_features,
+            categorical_lookup,
+            embedding_dim,
+            depth,
+            heads,
+            attn_dropout,
+            ff_dropout,
+            numerical_discretisers,
+            use_column_embedding,
+        )
+
+        self.decoders = []
+        self.n_features = len(categorical_features) + len(numerical_features)
+        n_features_emb = len(categorical_features) + len(numerical_features) * embedding_dim
+        for _ in range(self.n_features):
+            decoder = tf.keras.Sequential([
+                BatchNormalization(),
+                Dense(n_features_emb // rtd_factor, activation='selu'),
+                Dense(1, activation='sigmoid')
+            ])
+            self.decoders.append(decoder)
+        self.concatenate_output = Concatenate(axis=1)
+        
+    def call(self, inputs):
+        contextual_encoding = self.encoder(inputs)
+        rtd_prediction = [self.decoders[i](contextual_encoding) for i in range(self.n_features)]
+        rtd_prediction = self.concatenate_output(rtd_prediction)
+
+        return rtd_prediction
+
+    def get_encoder(self):
+        return self.encoder
+
+
+class TabTransformer(tf.keras.Model):
+    def __init__(
+        self,
+        out_dim: int,
+        out_activation: str,
+        categorical_features: list = None,
+        numerical_features: list = None,
+        categorical_lookup: dict = None,
+        embedding_dim: int = 32,
+        depth: int = 4,
+        heads: int = 8,
+        attn_dropout: float = 0.1,
+        ff_dropout: float = 0.1,
+        numerical_discretisers: dict = None,
+        use_column_embedding: bool = True,
+        mlp_hidden_factors: list = [2, 4],
+        encoder = None
+        
+    ):
+
+        super(TabTransformer, self).__init__()
+
+        # Initialise encoder
+        if encoder:
+            self.encoder = encoder
+        else:
+            self.encoder = TabTransformerEncoder(
+                categorical_features,
+                numerical_features,
+                categorical_lookup,
+                embedding_dim,
+                depth,
+                heads,
+                attn_dropout,
+                ff_dropout,
+                numerical_discretisers,
+                use_column_embedding,
+            )
+
+        # mlp layers
+        if self.encoder.quantize:
+            mlp_input_dim = embedding_dim * (
+                len(self.encoder.numerical) + len(self.encoder.categorical)
+            )
+        else:
+            mlp_input_dim = len(self.encoder.numerical) + embedding_dim * len(self.encoder.categorical)
+
+        self.mlp_final = build_mlp(mlp_input_dim, mlp_hidden_factors, ff_dropout)
+        self.output_layer = Dense(out_dim, activation=out_activation)
+
+    def call(self, inputs):
+        x = self.encoder(inputs)
+        x = self.mlp_final(x)
+        output = self.output_layer(x)
 
         return output
