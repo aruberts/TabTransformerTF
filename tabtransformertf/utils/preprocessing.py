@@ -1,7 +1,8 @@
-from tqdm import tqdm
-import tensorflow as tf
-import pandas as pd
 import numpy as np
+import pandas as pd
+import tensorflow as tf
+from tabtransformertf.utils.helper import corrupt_dataset
+from tqdm import tqdm
 
 
 def df_to_dataset(
@@ -56,9 +57,18 @@ def build_numerical_prep(data: pd.DataFrame, numerical_features: list, qs: int =
 
 
 def df_to_pretrain_dataset(
-    x: pd.DataFrame, y: np.array, shuffle: bool = True, batch_size: int = 512,
+    x: pd.DataFrame,
+    numeric_columns: list,
+    categorical_columns: list,
+    shuffle: bool = True,
+    batch_size: int = 512,
+    p_replace: float = 0.3,
+    
 ):
-
+    x, y = corrupt_dataset(x[numeric_columns + categorical_columns], p_replace)
+    x[numeric_columns] = x[numeric_columns].astype(float)
+    x[categorical_columns] = x[categorical_columns].astype(str)
+    
     dataset = {}
     for key, value in x.items():
         dataset[key] = value[:, tf.newaxis]
