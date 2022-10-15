@@ -73,7 +73,7 @@ class TabTransformerEncoder(tf.keras.Model):
         heads: int = 8,
         attn_dropout: float = 0.1,
         ff_dropout: float = 0.1,
-        numerical_discretisers: dict = None,
+        numerical_embeddings: dict = None,
         use_column_embedding: bool = True,
     ):
         """TabTransformer Tensorflow Model
@@ -96,7 +96,7 @@ class TabTransformerEncoder(tf.keras.Model):
         super(TabTransformerEncoder, self).__init__()
         self.numerical = numerical_features
         self.categorical = categorical_features
-        self.quantize = numerical_discretisers is not None
+        self.embed_numeric = numerical_embeddings is not None
         self.num_categories = [
             categorical_lookup[c].vocabulary_size() for c in self.categorical
         ]
@@ -104,26 +104,14 @@ class TabTransformerEncoder(tf.keras.Model):
         # ---------- Numerical Input -----------
         if len(self.numerical) > 0:
             # If we want to quantise numeric features
-            if self.quantize:
-                self.num_bins = [
-                    numerical_discretisers[n][1].vocabulary_size()
-                    for n in self.numerical
+            if self.embed_numeric:
+                # Layers to transform numeric into embedding
+                self.numerical_embeddings = numerical_embeddings
+                # Linear layer after embedding
+                self.numerical_embedding_linear = [
+                    Dense(embedding_dim, activation='relu') for n in self.numerical
                 ]
-                # Discretisation layers
-                self.numerical_discretisers = [
-                    numerical_discretisers[n][0] for n in self.numerical
-                ]
-                # Lookup layers
-                self.numerical_lookup = [
-                    numerical_discretisers[n][1] for n in self.numerical
-                ]
-                # Embedding layers
-                self.num_embedding_layers = []
-                for bins in self.num_bins:
-                    numerical_embedding = Embedding(
-                        input_dim=bins, output_dim=embedding_dim
-                    )
-                    self.num_embedding_layers.append(numerical_embedding)
+                
             else:
                 # If not quantising, then simply normalise and concatenate
                 self.continuous_normalization = LayerNormalization()
@@ -146,7 +134,7 @@ class TabTransformerEncoder(tf.keras.Model):
         self.use_column_embedding = use_column_embedding
         if use_column_embedding:
             num_columns = len(self.categorical)
-            if self.quantize:
+            if self.embed_numeric:
                 num_columns += len(self.numerical)
             self.column_embedding = Embedding(
                 input_dim=num_columns, output_dim=embedding_dim
@@ -180,10 +168,9 @@ class TabTransformerEncoder(tf.keras.Model):
         if len(self.numerical) > 0:
             # Each numeric feature needs to be binned, looked up, and embedded
             for i, n in enumerate(self.numerical):
-                if self.quantize:
-                    num_binned = self.numerical_discretisers[i](inputs[n])
-                    num_binned = self.numerical_lookup[i](num_binned)
-                    num_embedded = self.num_embedding_layers[i](num_binned)
+                if self.embed_numeric:
+                    num_embedded = self.numerical_embeddings[n](inputs[n])
+                    num_embedded = self.numerical_embedding_linear[i](num_embedded)
                     numerical_feature_list.append(num_embedded)
                 else:
                     # Otherwise we pass it as it is
@@ -194,7 +181,7 @@ class TabTransformerEncoder(tf.keras.Model):
             cat_embedded = self.cat_embedding_layers[i](cat_encoded)
             categorical_feature_list.append(cat_embedded)
 
-        if self.quantize:
+        if self.embed_numeric:
             # Stack categorical embeddings for the Tansformer.
             transformer_inputs = self.embedded_concatenation(
                 numerical_feature_list + categorical_feature_list
@@ -213,13 +200,12 @@ class TabTransformerEncoder(tf.keras.Model):
         mlp_input = self.flatten_transformer_output(transformer_inputs)
 
         # In case we don't quantize, we want to normalise and concatenate numerical features with embeddings
-        if (self.quantize is False) and (len(self.numerical) > 0):
+        if (self.embed_numeric is False) and (len(self.numerical) > 0):
             numerical_inputs = self.numerical_concatenation(numerical_feature_list)
             numerical_inputs = self.continuous_normalization(numerical_inputs)
             mlp_input = self.pre_mlp_concatenation([mlp_input, numerical_inputs])
 
         return mlp_input
-
 
 class TabTransformerRTD(tf.keras.Model):
     def __init__(
@@ -316,7 +302,7 @@ class TabTransformer(tf.keras.Model):
             )
 
         # mlp layers
-        if self.encoder.quantize:
+        if self.encoder.embed_numeric:
             mlp_input_dim = embedding_dim * (
                 len(self.encoder.numerical) + len(self.encoder.categorical)
             )
