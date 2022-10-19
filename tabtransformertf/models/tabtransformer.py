@@ -23,6 +23,7 @@ class TransformerBlock(Layer):
         ff_dim: int,
         att_dropout: float = 0.1,
         ff_dropout: float = 0.1,
+        explainable = False
     ):
         """Transformer model for TabTransformer
 
@@ -32,8 +33,10 @@ class TransformerBlock(Layer):
             ff_dim (int): size of feed-forward layer
             att_dropout (float, optional): dropout rate in multi-headed attention layer. Defaults to 0.1.
             ff_dropout (float, optional): dropout rate in feed-forward layer. Defaults to 0.1.
+            explainable (bool, optional): if True, returns attention weights
         """
         super(TransformerBlock, self).__init__()
+        self.explainable = explainable
         self.att = MultiHeadAttention(
             num_heads=num_heads, key_dim=embed_dim, dropout=att_dropout
         )
@@ -46,8 +49,13 @@ class TransformerBlock(Layer):
         self.skip2 = Add()
 
     def call(self, inputs):
-        # Multi headed attention
-        attention_output = self.att(inputs, inputs)
+        if self.explainable:
+            # Multi headed attention with attentio nscores
+            attention_output, att_weights = self.att(inputs, inputs, return_attention_scores=True)
+        else:
+            # Without attention
+            attention_output = self.att(inputs, inputs)
+
         # Skip connection
         attention_output = self.skip1([inputs, attention_output])
         # Layer norm
@@ -58,8 +66,11 @@ class TransformerBlock(Layer):
         feedforward_output = self.skip2([feedforward_output, attention_output])
         # Layer norm
         transformer_output = self.layernorm2(feedforward_output)
-
-        return transformer_output
+        
+        if self.explainable:
+            return transformer_output, att_weights
+        else:
+            return transformer_output
 
 
 class TabTransformerEncoder(tf.keras.Model):
