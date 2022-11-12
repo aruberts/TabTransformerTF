@@ -1,9 +1,10 @@
+import math as m
 import numpy as np
 import pandas as pd
 import tensorflow as tf
 from tabtransformertf.utils.helper import corrupt_dataset
 from tqdm import tqdm
-from sklearn.tree import DecisionTreeClassifier
+from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 
 
 def df_to_dataset(
@@ -89,9 +90,14 @@ class PLE(tf.keras.layers.Layer):
         super(PLE, self).__init__()
         self.n_bins = n_bins
 
-    def adapt(self, data, y=None):
+    def adapt(self, data, y=None, task='classification', tree_params = {}):
         if y is not None:
-            dt = DecisionTreeClassifier(max_depth=self.n_bins)
+            if task == 'classification':
+                dt = DecisionTreeClassifier(max_leaf_nodes=self.n_bins, **tree_params)
+            elif task == 'regression':
+                dt = DecisionTreeRegressor(max_leaf_nodes=self.n_bins, **tree_params)
+            else:
+                raise ValueError("This task is not supported")
             dt.fit(data, y)
             bins = tf.sort(tf.cast(tf.unique(dt.tree_.threshold).y, dtype=tf.float32))
         else:
@@ -109,7 +115,6 @@ class PLE(tf.keras.layers.Layer):
         )
         self.lookup_table = tf.lookup.StaticHashTable(init, default_value=-1)
         self.lookup_size = self.lookup_table.size()
-
 
     def call(self, x):
         ple_encoding_one = tf.ones((tf.shape(x)[0], self.n_bins))
@@ -140,3 +145,30 @@ class PLE(tf.keras.layers.Layer):
         enc = tf.reshape(tf.where(other_mask, other_case, enc), (-1, 1, self.n_bins))
 
         return enc
+
+class Periodic(tf.keras.layers.Layer):
+  def __init__(self, emb_dim, n_bins=50, sigma=5):
+      super(Periodic, self).__init__()
+      self.n_bins = n_bins
+      self.emb_dim = emb_dim
+      self.sigma = sigma
+  
+  def build(self, input_shape):  # Create the state of the layer (weights)
+    w_init = tf.random_normal_initializer(stddev=self.sigma)
+    self.p = tf.Variable(
+        initial_value=w_init(shape=(input_shape[-1], self.n_bins),
+                             dtype='float32'),
+        trainable=True)
+
+    self.l = tf.Variable(
+        initial_value=w_init(
+            shape=(input_shape[-1], self.n_bins*2, self.emb_dim), dtype='float32' # features, n_bins, emb_dim
+            ), trainable=True)
+
+  def call(self, inputs):  # Defines the computation from inputs to outputs
+    v = 2 * m.pi * self.p[None] * inputs[..., None]
+    emb = tf.concat([tf.math.sin(v), tf.math.cos(v)], axis=-1)
+    emb = tf.einsum('fne, bfn -> bfe', self.l, emb)
+    emb = tf.nn.relu(emb)
+
+    return emb
