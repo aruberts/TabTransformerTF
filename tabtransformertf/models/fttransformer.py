@@ -1,28 +1,30 @@
+import numpy as np
 import tensorflow as tf
 from tabtransformertf.models.tabtransformer import TransformerBlock
 from tensorflow.keras.layers import (
-    Concatenate,
     Dense,
-    Embedding,
     Flatten,
-    LayerNormalization,
 )
-
+import math as m
+from tabtransformertf.models.embeddings import CEmbedding, NEmbedding
 
 class FTTransformerEncoder(tf.keras.Model):
     def __init__(
         self,
         categorical_features: list,
         numerical_features: list,
-        categorical_lookup: dict,
+        numerical_data: np.array,
+        categorical_data: np.array,
+        y: np.array = None,
+        task: str = None,
         embedding_dim: int = 32,
         depth: int = 4,
         heads: int = 8,
         attn_dropout: float = 0.1,
         ff_dropout: float = 0.1,
         numerical_embedding_type: str = 'linear',
-        numerical_embeddings: dict = None,
-        use_column_embedding: bool = True,
+        numerical_bins: int = None,
+        ple_tree_params: dict = {},
         explainable=False,
     ):
         """FTTransformer Encoder
@@ -52,61 +54,27 @@ class FTTransformerEncoder(tf.keras.Model):
         self.explainable = explainable
         self.depth = depth
         self.heads = heads
-
-        self.num_categories = [
-            categorical_lookup[c].vocabulary_size() for c in self.categorical
-        ]
-        if numerical_embedding_type not in {None, "linear", "ple"}:
-            raise ValueError("numerical_embedding_type must be linear or ple")
-
-        if (numerical_embedding_type == "ple") & (numerical_embeddings is None):
-            raise ValueError(
-                "When embedding type is PLE, numerical_embeddings must be a dict with PLE layers"
-            )
-
-        # ---------- Numerical Input -----------
+            
+        # Two main embedding modules
         if len(self.numerical) > 0:
-            # If we want to embed numerical features
-            if self.numerical_embedding_type:
-                # Layers to transform numeric into embedding
-                self.numerical_embeddings = numerical_embeddings
-                # Linear layer after embedding
-                self.numerical_embedding_linear = [
-                    Dense(embedding_dim, activation="relu") for n in self.numerical
-                ]
-            else:
-                # If not embedding, then simply normalise and concatenate
-                self.continuous_normalization = LayerNormalization()
-                self.numerical_concatenation = Concatenate(axis=1)
-
-        # ---------- Categorical Input -----------
-
-        # String lookups for categorical
-        self.categorical_lookups = [categorical_lookup[c] for c in self.categorical]
-
-        # Categorical input embedding
-        self.cat_embedding_layers = []
-        for number_of_classes in self.num_categories:
-            category_embedding = Embedding(
-                input_dim=number_of_classes, output_dim=embedding_dim
+            self.numerical_embeddings = NEmbedding(
+                feature_names=self.numerical, 
+                X=numerical_data, 
+                y=y,
+                task=task,
+                emb_dim=embedding_dim, 
+                emb_type=numerical_embedding_type, 
+                n_bins=numerical_bins,
+                tree_params=ple_tree_params
             )
-            self.cat_embedding_layers.append(category_embedding)
-
-        # Column embedding
-        self.use_column_embedding = use_column_embedding
-        if use_column_embedding:
-            num_columns = len(self.categorical)
-            if self.numerical_embedding_type:
-                num_columns += len(self.numerical)
-            self.column_embedding = Embedding(
-                input_dim=num_columns + 1, output_dim=embedding_dim
+        if len(self.categorical) > 0:
+            self.categorical_embeddings = CEmbedding(
+                feature_names=self.categorical,
+                X=categorical_data,
+                emb_dim =embedding_dim
             )
-            self.column_indices = tf.range(start=0, limit=num_columns + 1, delta=1)
 
-        # Embedding concatenation layer
-        self.embedded_concatenation = Concatenate(axis=1)
-
-        # adding transformers
+        # Transformers
         self.transformers = []
         for _ in range(depth):
             self.transformers.append(
@@ -121,9 +89,6 @@ class FTTransformerEncoder(tf.keras.Model):
             )
         self.flatten_transformer_output = Flatten()
 
-        # MLP
-        self.pre_mlp_concatenation = Concatenate()
-
         # CLS token
         w_init = tf.random_normal_initializer()
         self.cls_weights = tf.Variable(
@@ -132,40 +97,35 @@ class FTTransformerEncoder(tf.keras.Model):
         )
 
     def call(self, inputs):
-        numerical_feature_list = []
-        categorical_feature_list = []
-        importances = []
-
-        # Each numeric feature needs to be binned, looked up, and embedded
-        for i, n in enumerate(self.numerical):
-            if self.numerical_embedding_type == "ple":
-                num_embedded = self.numerical_embeddings[n](inputs[n])
-                num_embedded = self.numerical_embedding_linear[i](num_embedded)
-                numerical_feature_list.append(num_embedded)
-            elif self.numerical_embedding_type == "linear":
-                num_embedded = tf.expand_dims(inputs[n], axis=1)
-                num_embedded = self.numerical_embedding_linear[i](num_embedded)
-                numerical_feature_list.append(num_embedded)
-            else:
-                raise ValueError("numerical_embedding_type must be 'ple' or 'linear'")
-
-        for i, c in enumerate(self.categorical):
-            cat_encoded = self.categorical_lookups[i](inputs[c])
-            cat_embedded = self.cat_embedding_layers[i](cat_encoded)
-            categorical_feature_list.append(cat_embedded)
-
-        cls_tokens = tf.repeat(self.cls_weights, repeats=tf.shape(inputs[c])[0], axis=0)
+        # Start with CLS token
+        cls_tokens = tf.repeat(self.cls_weights, repeats=tf.shape(inputs[self.numerical[0]])[0], axis=0)
         cls_tokens = tf.expand_dims(cls_tokens, axis=1)
-
-        # Stack categorical embeddings for the Tansformer.
-        transformer_inputs = self.embedded_concatenation(
-            numerical_feature_list + categorical_feature_list + [cls_tokens]
-        )
-
-        if self.use_column_embedding:
-            # Add column embeddings
-            transformer_inputs += self.column_embedding(self.column_indices)
-
+        transformer_inputs = [cls_tokens]
+    
+        # If categorical features, add to list
+        if len(self.categorical) > 0:
+            cat_input = []
+            for c in self.categorical:
+                cat_input.append(inputs[c])
+            
+            cat_input = tf.stack(cat_input, axis=1)[:, :, 0]
+            cat_embs = self.categorical_embeddings(cat_input)
+            transformer_inputs += [cat_embs]
+        
+        # If numerical features, add to list
+        if len(self.numerical) > 0:
+            num_input = []
+            for n in self.numerical:
+                num_input.append(inputs[n])
+            num_input = tf.stack(num_input, axis=1)[:, :, 0]
+            num_embs = self.numerical_embeddings(num_input)
+            transformer_inputs += [num_embs]
+        
+        # Prepare for Transformer
+        transformer_inputs = tf.concat(transformer_inputs, axis=1)
+        importances = []
+        
+        # Pass through Transformer blocks
         for transformer in self.transformers:
             if self.explainable:
                 transformer_inputs, att_weights = transformer(transformer_inputs)
@@ -188,7 +148,6 @@ class FTTransformer(tf.keras.Model):
         self,
         out_dim: int,
         out_activation: str,
-        final_layer_size: int = 32,
         categorical_features: list = None,
         numerical_features: list = None,
         categorical_lookup: dict = None,
@@ -199,7 +158,6 @@ class FTTransformer(tf.keras.Model):
         ff_dropout: float = 0.1,
         numerical_embedding_type: str = None,
         numerical_embeddings: dict = None,
-        use_column_embedding: bool = True,
         explainable=False,
         encoder=None,
     ):
@@ -220,21 +178,19 @@ class FTTransformer(tf.keras.Model):
                 ff_dropout = ff_dropout,
                 numerical_embedding_type = numerical_embedding_type,
                 numerical_embeddings = numerical_embeddings,
-                use_column_embedding = use_column_embedding,
                 explainable = explainable,
             )
 
         # mlp layers
-        self.final_layer = Dense(final_layer_size, activation="relu")
         self.output_layer = Dense(out_dim, activation=out_activation)
-
+    
     def call(self, inputs):
         if self.encoder.explainable:
             x, expl = self.encoder(inputs)
         else:
             x = self.encoder(inputs)
-        x = self.final_layer(x[:, -1, :])
-        output = self.output_layer(x)
+
+        output = self.output_layer(x[:, 0, :])
 
         if self.encoder.explainable:
             # Explaianble models return two outputs
