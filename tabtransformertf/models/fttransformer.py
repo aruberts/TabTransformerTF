@@ -85,6 +85,7 @@ class FTTransformerEncoder(tf.keras.Model):
                     att_dropout=attn_dropout,
                     ff_dropout=ff_dropout,
                     explainable=self.explainable,
+                    post_norm=False,  # FT-Transformer uses pre-norm
                 )
             )
         self.flatten_transformer_output = Flatten()
@@ -129,7 +130,7 @@ class FTTransformerEncoder(tf.keras.Model):
         for transformer in self.transformers:
             if self.explainable:
                 transformer_inputs, att_weights = transformer(transformer_inputs)
-                importances.append(tf.reduce_sum(att_weights[:, :, -1, :], axis=1))
+                importances.append(tf.reduce_sum(att_weights[:, :, 0, :], axis=1))
             else:
                 transformer_inputs = transformer(transformer_inputs)
 
@@ -182,6 +183,8 @@ class FTTransformer(tf.keras.Model):
             )
 
         # mlp layers
+        self.ln = tf.keras.layers.LayerNormalization()
+        self.final_ff = Dense(embedding_dim//2, activation='relu')
         self.output_layer = Dense(out_dim, activation=out_activation)
     
     def call(self, inputs):
@@ -190,7 +193,9 @@ class FTTransformer(tf.keras.Model):
         else:
             x = self.encoder(inputs)
 
-        output = self.output_layer(x[:, 0, :])
+        layer_norm_cls = self.ln(x[:, 0, :])
+        layer_norm_cls = self.final_ff(layer_norm_cls)
+        output = self.output_layer(layer_norm_cls)
 
         if self.encoder.explainable:
             # Explaianble models return two outputs
