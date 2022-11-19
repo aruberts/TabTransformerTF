@@ -99,7 +99,13 @@ class PLE(tf.keras.layers.Layer):
             else:
                 raise ValueError("This task is not supported")
             dt.fit(data, y)
-            bins = tf.sort(tf.cast(tf.unique(dt.tree_.threshold).y, dtype=tf.float32))
+            tree_thresholds = []
+            for node_id in range(dt.tree_.node_count):
+                # the following condition is True only for split nodes
+                if dt.tree_.children_left[node_id] != dt.tree_.children_right[node_id]:
+                    tree_thresholds.append(dt.tree_.threshold[node_id])
+            tree_thresholds += [data.max(), data.min()]
+            bins = tf.sort(tf.cast(tf.unique(tree_thresholds).y, dtype=tf.float32))
         else:
             interval = 1 / self.n_bins
             bins = tf.unique(
