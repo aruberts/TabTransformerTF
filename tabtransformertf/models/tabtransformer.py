@@ -1,4 +1,5 @@
 import tensorflow as tf
+from tabtransformertf.utils.helper import build_mlp
 from tensorflow.keras.activations import gelu
 from tensorflow.keras.layers import (
     Add,
@@ -12,7 +13,6 @@ from tensorflow.keras.layers import (
     LayerNormalization,
     MultiHeadAttention,
 )
-from tabtransformertf.utils.helper import build_mlp
 
 
 class TransformerBlock(Layer):
@@ -23,7 +23,8 @@ class TransformerBlock(Layer):
         ff_dim: int,
         att_dropout: float = 0.1,
         ff_dropout: float = 0.1,
-        explainable = False
+        explainable: bool = False,
+        post_norm: bool = True,
     ):
         """Transformer model for TabTransformer
 
@@ -37,36 +38,56 @@ class TransformerBlock(Layer):
         """
         super(TransformerBlock, self).__init__()
         self.explainable = explainable
+        self.post_norm = post_norm
         self.att = MultiHeadAttention(
             num_heads=num_heads, key_dim=embed_dim, dropout=att_dropout
         )
         self.skip1 = Add()
         self.layernorm1 = LayerNormalization(epsilon=1e-6)
         self.ffn = tf.keras.Sequential(
-            [Dense(ff_dim, activation=gelu), Dropout(ff_dropout), Dense(embed_dim),]
+            [
+                Dense(ff_dim, activation=gelu),
+                Dropout(ff_dropout),
+                Dense(embed_dim),
+            ]
         )
         self.layernorm2 = LayerNormalization(epsilon=1e-6)
         self.skip2 = Add()
 
     def call(self, inputs):
-        if self.explainable:
-            # Multi headed attention with attentio nscores
-            attention_output, att_weights = self.att(inputs, inputs, return_attention_scores=True)
+        # Post-norm variant
+        if self.post_norm:
+            inputs = self.layernorm1(inputs)
+            if self.explainable:
+                # Multi headed attention with attentio nscores
+                attention_output, att_weights = self.att(
+                    inputs, inputs, return_attention_scores=True
+                )
+            else:
+                # Without attention
+                attention_output = self.att(inputs, inputs)
+            attention_output = self.skip1([inputs, attention_output])   
+            feedforward_output = self.ffn(attention_output) 
+            transformer_output = self.skip2([feedforward_output, attention_output])
+            transformer_output = self.layernorm2(transformer_output)
+        # Pre-norm variant
         else:
-            # Without attention
-            attention_output = self.att(inputs, inputs)
+            norm_input = self.layernorm1(inputs)
+            if self.explainable:
+                # Multi headed attention with attentio nscores
+                attention_output, att_weights = self.att(
+                    norm_input, norm_input, return_attention_scores=True
+                )
+            else:
+                # Without attention
+                attention_output = self.att(norm_input, norm_input)
 
-        # Skip connection
-        attention_output = self.skip1([inputs, attention_output])
-        # Layer norm
-        attention_output = self.layernorm1(attention_output)
-        # Feed Forward
-        feedforward_output = self.ffn(attention_output)
-        # Skip connection
-        feedforward_output = self.skip2([feedforward_output, attention_output])
-        # Layer norm
-        transformer_output = self.layernorm2(feedforward_output)
+            attention_output = self.skip1([inputs, attention_output])
+            norm_attention_output = self.layernorm2(attention_output)
+            feedforward_output = self.ffn(norm_attention_output)
+            transformer_output = self.skip2([feedforward_output, attention_output])
         
+        # Outputs
         if self.explainable:
             return transformer_output, att_weights
         else:
@@ -120,9 +141,9 @@ class TabTransformerEncoder(tf.keras.Model):
                 self.numerical_embeddings = numerical_embeddings
                 # Linear layer after embedding
                 self.numerical_embedding_linear = [
-                    Dense(embedding_dim, activation='relu') for n in self.numerical
+                    Dense(embedding_dim, activation="relu") for n in self.numerical
                 ]
-                
+
             else:
                 # If not quantising, then simply normalise and concatenate
                 self.continuous_normalization = LayerNormalization()
@@ -218,6 +239,7 @@ class TabTransformerEncoder(tf.keras.Model):
 
         return mlp_input
 
+
 class TabTransformerRTD(tf.keras.Model):
     def __init__(
         self,
@@ -252,19 +274,25 @@ class TabTransformerRTD(tf.keras.Model):
 
         self.decoders = []
         self.n_features = len(categorical_features) + len(numerical_features)
-        n_features_emb = len(categorical_features) + len(numerical_features) * embedding_dim
+        n_features_emb = (
+            len(categorical_features) + len(numerical_features) * embedding_dim
+        )
         for _ in range(self.n_features):
-            decoder = tf.keras.Sequential([
-                BatchNormalization(),
-                Dense(n_features_emb // rtd_factor, activation='selu'),
-                Dense(1, activation='sigmoid')
-            ])
+            decoder = tf.keras.Sequential(
+                [
+                    BatchNormalization(),
+                    Dense(n_features_emb // rtd_factor, activation="selu"),
+                    Dense(1, activation="sigmoid"),
+                ]
+            )
             self.decoders.append(decoder)
         self.concatenate_output = Concatenate(axis=1)
-        
+
     def call(self, inputs):
         contextual_encoding = self.encoder(inputs)
-        rtd_prediction = [self.decoders[i](contextual_encoding) for i in range(self.n_features)]
+        rtd_prediction = [
+            self.decoders[i](contextual_encoding) for i in range(self.n_features)
+        ]
         rtd_prediction = self.concatenate_output(rtd_prediction)
 
         return rtd_prediction
@@ -289,8 +317,7 @@ class TabTransformer(tf.keras.Model):
         numerical_discretisers: dict = None,
         use_column_embedding: bool = True,
         mlp_hidden_factors: list = [2, 4],
-        encoder = None
-        
+        encoder=None,
     ):
 
         super(TabTransformer, self).__init__()
@@ -318,7 +345,9 @@ class TabTransformer(tf.keras.Model):
                 len(self.encoder.numerical) + len(self.encoder.categorical)
             )
         else:
-            mlp_input_dim = len(self.encoder.numerical) + embedding_dim * len(self.encoder.categorical)
+            mlp_input_dim = len(self.encoder.numerical) + embedding_dim * len(
+                self.encoder.categorical
+            )
 
         self.mlp_final = build_mlp(mlp_input_dim, mlp_hidden_factors, ff_dropout)
         self.output_layer = Dense(out_dim, activation=out_activation)
