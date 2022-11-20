@@ -46,11 +46,12 @@ from tabtransformertf.models.fttransformer import FTTransformerEncoder, FTTransf
 
 # Encoder is specified separately in case we decide to pre-train the model
 ft_linear_encoder = FTTransformerEncoder(
-    numerical_features = NUMERIC_FEATURES,  # list of numeric features
-    categorical_features = CATEGORICAL_FEATURES,  # list of numeric features
-    categorical_lookup=category_prep_layers,  # dictionary of categorical lookup layers
-    numerical_embeddings=None,  # None for linear embeddings
-    numerical_embedding_type='linear',  # Numerical embedding type
+    numerical_features = NUMERIC_FEATURES, # list of numeric features
+    categorical_features = CATEGORICAL_FEATURES, # list of categorical features
+    numerical_data = X_train[NUMERIC_FEATURES].values, # train array of numerical features
+    categorical_data = X_train[CATEGORICAL_FEATURES].values, # train array of categorical features
+    y = None, # not needed for linear
+    numerical_embedding_type='linear',
     embedding_dim=16,  # Embedding dimension (for categorical, numerical, and contextual)
     depth=3,  # Number of Transformer Blocks (layers)
     heads=6,  # Number of attention heads in a Transofrmer Block
@@ -65,7 +66,6 @@ ft_linear_transformer = FTTransformer(
     encoder=ft_linear_encoder,  # Encoder from above
     out_dim=1,  # Number of outputs in final layer
     out_activation='sigmoid',  # Activation function for final layer
-    final_layer_size=32,  # Pre-final layer, takes CLS contextual embeddings as input 
 )
 
 preds = ft_linear_transformer.predict(train_dataset)
